@@ -32,7 +32,7 @@ class ExtractedEntities(BaseModel):
 
 
 EXTRACTION_PROMPT = """You are an expert at extracting business process elements from Korean business documents.
-
+{existing_context}
 Analyze the following text and extract:
 1. **Processes**: Business processes or procedures (절차, 업무 흐름, 처리 단계, 프로세스)
 2. **Tasks/Activities**: Individual activities or actions (행위: ~한다, ~해야 한다, 점검, 승인, 검토, 접수, 등록, 통보, 보고)
@@ -99,6 +99,35 @@ Respond with a JSON object containing arrays for each entity type.
 Return ONLY valid JSON, no markdown formatting."""
 
 
+# Context template for existing processes/roles
+EXISTING_CONTEXT_TEMPLATE = """
+**IMPORTANT - EXISTING ENTITIES (이미 추출된 엔티티들):**
+
+{process_list}
+{role_list}
+
+**CRITICAL RULES FOR PROCESS IDENTIFICATION (프로세스 식별 규칙):**
+1. If a task clearly belongs to an EXISTING process listed above, use that EXACT process name for parent_process.
+   (태스크가 위에 나열된 기존 프로세스에 속하면, 정확히 그 프로세스 이름을 parent_process로 사용하세요)
+
+2. Do NOT create a new process if the content describes steps/tasks of an existing process.
+   (내용이 기존 프로세스의 단계/태스크를 설명하는 경우 새 프로세스를 만들지 마세요)
+
+3. "발주 처리", "입고 검수", "대금 지급" etc. are likely TASKS within a larger process, NOT separate processes.
+   ("발주 처리", "입고 검수", "대금 지급" 등은 별도 프로세스가 아니라 상위 프로세스의 태스크일 가능성이 높습니다)
+
+4. Look for phrases like "~단계", "~절차", "제N조" which indicate sub-steps of an existing process.
+   ("~단계", "~절차", "제N조" 같은 표현은 기존 프로세스의 하위 단계를 나타냅니다)
+
+5. Only create a NEW process if the text explicitly defines a completely different business process.
+   (텍스트가 완전히 다른 업무 프로세스를 명시적으로 정의하는 경우에만 새 프로세스를 생성하세요)
+
+6. For existing roles, use the EXACT same name - do not create duplicates with slightly different names.
+   (기존 역할의 경우 정확히 같은 이름을 사용하세요 - 약간 다른 이름으로 중복 생성하지 마세요)
+
+"""
+
+
 class EntityExtractor:
     """Extract business process entities using LLM."""
     
@@ -112,10 +141,54 @@ class EntityExtractor:
         self.prompt = ChatPromptTemplate.from_template(EXTRACTION_PROMPT)
         self.chain = self.prompt | self.llm | self.parser
     
-    def extract_from_text(self, text: str) -> ExtractedEntities:
-        """Extract entities from text using LLM."""
+    def _build_context(
+        self, 
+        existing_processes: list[str] = None, 
+        existing_roles: list[str] = None
+    ) -> str:
+        """기존 프로세스/역할 목록으로 컨텍스트 문자열 생성"""
+        if not existing_processes and not existing_roles:
+            return ""
+        
+        process_list = ""
+        if existing_processes:
+            process_list = "**기존 프로세스 목록 (Existing Processes):**\n" + \
+                          "\n".join(f"  - {p}" for p in existing_processes)
+        
+        role_list = ""
+        if existing_roles:
+            role_list = "**기존 역할 목록 (Existing Roles):**\n" + \
+                       "\n".join(f"  - {r}" for r in existing_roles)
+        
+        return EXISTING_CONTEXT_TEMPLATE.format(
+            process_list=process_list,
+            role_list=role_list
+        )
+    
+    def extract_from_text(
+        self, 
+        text: str,
+        existing_processes: list[str] = None,
+        existing_roles: list[str] = None
+    ) -> ExtractedEntities:
+        """Extract entities from text using LLM.
+        
+        Args:
+            text: 분석할 텍스트
+            existing_processes: 이미 추출된 프로세스 이름 목록
+            existing_roles: 이미 추출된 역할 이름 목록
+        
+        Returns:
+            ExtractedEntities: 추출된 엔티티들
+        """
         try:
-            result = self.chain.invoke({"text": text})
+            # 기존 컨텍스트 생성
+            existing_context = self._build_context(existing_processes, existing_roles)
+            
+            result = self.chain.invoke({
+                "text": text,
+                "existing_context": existing_context
+            })
             return ExtractedEntities(**result)
         except Exception as e:
             print(f"Extraction error: {e}")
@@ -218,11 +291,15 @@ class EntityExtractor:
             task_order = t.get("order")
             if task_order is None:
                 task_order = i
+            elif isinstance(task_order, (int, float)):
+                task_order = int(task_order)
             elif isinstance(task_order, str):
                 try:
-                    task_order = int(task_order)
+                    task_order = int(float(task_order))
                 except:
                     task_order = i
+            else:
+                task_order = i
             
             task_name = t.get("name", f"Task {i+1}")
             

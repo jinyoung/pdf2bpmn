@@ -128,8 +128,16 @@ class PDF2BPMNWorkflow:
             if section.page_from in chunk_by_page and chunk_by_page[section.page_from]:
                 section_chunk_id = chunk_by_page[section.page_from][0].chunk_id
             
-            # Extract entities from section content
-            extracted = self.entity_extractor.extract_from_text(section.content)
+            # Extract entities from section content with existing context
+            # 기존 프로세스/역할 목록을 LLM에 전달하여 동일 프로세스 식별 개선
+            existing_process_names = list(self.process_name_to_id.keys())
+            existing_role_names = list(self.role_name_to_id.keys())
+            
+            extracted = self.entity_extractor.extract_from_text(
+                section.content,
+                existing_processes=existing_process_names,
+                existing_roles=existing_role_names
+            )
             
             # Convert to entity objects with relationships
             entities = self.entity_extractor.convert_to_entities(
@@ -192,8 +200,18 @@ class PDF2BPMNWorkflow:
         events = state.get("events", [])
         decisions = state.get("dmn_decisions", [])
         
-        # Deduplicate processes
-        unique_processes = self._deduplicate_entities(processes, "Process")
+        # 1. 먼저 프로세스 병합 (같은 이름의 프로세스를 하나로)
+        unique_processes, process_id_mapping = self._merge_duplicate_processes(processes)
+        
+        # 2. 태스크의 process_id를 병합된 프로세스로 업데이트
+        tasks = self._update_task_process_ids(tasks, process_id_mapping)
+        
+        # 3. 게이트웨이, 이벤트의 process_id도 업데이트
+        gateways = self._update_entity_process_ids(gateways, process_id_mapping, "gateway_id")
+        events = self._update_entity_process_ids(events, process_id_mapping, "event_id")
+        
+        # 4. task_process_map도 업데이트
+        self._update_task_process_map(process_id_mapping)
         
         # Deduplicate tasks
         unique_tasks = self._deduplicate_entities(tasks, "Task")
@@ -204,7 +222,7 @@ class PDF2BPMNWorkflow:
         # Deduplicate decisions
         unique_decisions = self._deduplicate_entities(decisions, "Decision")
         
-        print(f"   Processes: {len(processes)} → {len(unique_processes)}")
+        print(f"   Processes: {len(processes)} → {len(unique_processes)} (merged {len(processes) - len(unique_processes)})")
         print(f"   Tasks: {len(tasks)} → {len(unique_tasks)}")
         print(f"   Roles: {len(roles)} → {len(unique_roles)}")
         print(f"   Decisions: {len(decisions)} → {len(unique_decisions)}")
@@ -339,6 +357,79 @@ class PDF2BPMNWorkflow:
                         MATCH (t:Task {task_id: $task_id})
                         MERGE (p)-[:HAS_TASK]->(t)
                     """, {"proc_id": default_process_id, "task_id": task.task_id})
+    
+    def _merge_duplicate_processes(self, processes: list) -> tuple[list, dict]:
+        """
+        같은 이름의 프로세스를 병합하고, 병합된 프로세스 ID 매핑을 반환.
+        
+        Returns:
+            tuple: (병합된 프로세스 목록, {기존 process_id -> 병합된 process_id} 매핑)
+        """
+        if not processes:
+            return [], {}
+        
+        # 이름별로 프로세스 그룹화
+        name_to_processes = {}
+        for proc in processes:
+            name_key = proc.name.lower().strip()
+            if name_key not in name_to_processes:
+                name_to_processes[name_key] = []
+            name_to_processes[name_key].append(proc)
+        
+        unique_processes = []
+        process_id_mapping = {}  # old_id -> new_id
+        
+        for name_key, proc_group in name_to_processes.items():
+            # 첫 번째 프로세스를 primary로 선택
+            primary = proc_group[0]
+            unique_processes.append(primary)
+            
+            # 나머지 프로세스의 정보를 primary에 병합
+            for other in proc_group[1:]:
+                # ID 매핑 저장 (다른 프로세스 ID -> primary ID)
+                process_id_mapping[other.proc_id] = primary.proc_id
+                
+                # 설명 병합 (빈 경우에만)
+                if other.description and not primary.description:
+                    primary.description = other.description
+                if other.purpose and not primary.purpose:
+                    primary.purpose = other.purpose
+                
+                print(f"   🔗 프로세스 병합: '{other.name}' ({other.proc_id[:8]}...) → ({primary.proc_id[:8]}...)")
+            
+            # primary도 자기 자신으로 매핑 (일관성)
+            process_id_mapping[primary.proc_id] = primary.proc_id
+        
+        return unique_processes, process_id_mapping
+    
+    def _update_task_process_ids(self, tasks: list, process_id_mapping: dict) -> list:
+        """태스크의 process_id를 병합된 프로세스 ID로 업데이트."""
+        for task in tasks:
+            if task.process_id and task.process_id in process_id_mapping:
+                old_id = task.process_id
+                new_id = process_id_mapping[old_id]
+                if old_id != new_id:
+                    task.process_id = new_id
+        return tasks
+    
+    def _update_entity_process_ids(self, entities: list, process_id_mapping: dict, id_field: str) -> list:
+        """게이트웨이, 이벤트 등의 process_id를 병합된 프로세스 ID로 업데이트."""
+        for entity in entities:
+            if hasattr(entity, 'process_id') and entity.process_id:
+                if entity.process_id in process_id_mapping:
+                    old_id = entity.process_id
+                    new_id = process_id_mapping[old_id]
+                    if old_id != new_id:
+                        entity.process_id = new_id
+        return entities
+    
+    def _update_task_process_map(self, process_id_mapping: dict):
+        """task_process_map의 process_id를 병합된 ID로 업데이트."""
+        for task_id, proc_id in list(self.task_process_map.items()):
+            if proc_id in process_id_mapping:
+                new_proc_id = process_id_mapping[proc_id]
+                if proc_id != new_proc_id:
+                    self.task_process_map[task_id] = new_proc_id
     
     def _deduplicate_entities(self, entities: list, entity_type: str) -> list:
         """Deduplicate entities based on name similarity."""
