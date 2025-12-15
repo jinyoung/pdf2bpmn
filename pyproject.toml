@@ -1,0 +1,37 @@
+[project]
+name = "pdf2bpmn"
+version = "0.1.0"
+description = "PDF to BPMN converter with Neo4j knowledge graph and LangGraph HITL workflow"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "langgraph>=0.2.0",
+    "langchain>=0.3.0",
+    "langchain-openai>=0.2.0",
+    "langchain-community>=0.3.0",
+    "neo4j>=5.0.0",
+    "openai>=1.0.0",
+    "pypdf>=4.0.0",
+    "pdfplumber>=0.11.0",
+    "tiktoken>=0.7.0",
+    "numpy>=1.26.0",
+    "pydantic>=2.0.0",
+    "streamlit>=1.38.0",
+    "python-dotenv>=1.0.0",
+    "jinja2>=3.1.0",
+    "uuid6>=2024.0.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+    "python-multipart>=0.0.12",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+

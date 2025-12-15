@@ -1,0 +1,180 @@
+import { defineStore } from 'pinia'
+import { ref, computed } from 'vue'
+import axios from 'axios'
+
+export const useAppStore = defineStore('app', () => {
+  // State
+  const currentJob = ref(null)
+  const stats = ref(null)
+  const processes = ref([])
+  const tasks = ref([])
+  const roles = ref([])
+  const decisions = ref([])
+  const flows = ref([])
+  const bpmnContent = ref('')
+  const loading = ref(false)
+  const error = ref(null)
+
+  // Actions
+  async function uploadFile(file) {
+    const formData = new FormData()
+    formData.append('file', file)
+    
+    try {
+      loading.value = true
+      error.value = null
+      const response = await axios.post('/api/upload', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      })
+      currentJob.value = {
+        ...response.data,
+        status: 'pending',
+        progress: 0,
+        steps: []
+      }
+      return response.data
+    } catch (e) {
+      error.value = e.response?.data?.detail || e.message
+      throw e
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function startProcessing(jobId) {
+    try {
+      await axios.post(`/api/process/${jobId}`)
+      return true
+    } catch (e) {
+      error.value = e.response?.data?.detail || e.message
+      return false
+    }
+  }
+
+  function subscribeToJob(jobId, onUpdate) {
+    const eventSource = new EventSource(`/api/jobs/${jobId}/stream`)
+    
+    eventSource.onmessage = (event) => {
+      const data = JSON.parse(event.data)
+      currentJob.value = data
+      onUpdate(data)
+      
+      if (data.status === 'completed' || data.status === 'error') {
+        eventSource.close()
+      }
+    }
+    
+    eventSource.onerror = () => {
+      eventSource.close()
+    }
+    
+    return () => eventSource.close()
+  }
+
+  async function fetchStats() {
+    try {
+      const response = await axios.get('/api/graph-stats')
+      stats.value = response.data
+    } catch (e) {
+      console.error('Failed to fetch stats:', e)
+    }
+  }
+
+  async function fetchProcesses() {
+    try {
+      loading.value = true
+      const response = await axios.get('/api/processes')
+      processes.value = response.data.processes
+    } catch (e) {
+      error.value = e.message
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function fetchTasks() {
+    try {
+      loading.value = true
+      const response = await axios.get('/api/tasks')
+      tasks.value = response.data.tasks
+    } catch (e) {
+      error.value = e.message
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function fetchRoles() {
+    try {
+      loading.value = true
+      const response = await axios.get('/api/roles')
+      roles.value = response.data.roles
+    } catch (e) {
+      error.value = e.message
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function fetchDecisions() {
+    try {
+      loading.value = true
+      const response = await axios.get('/api/decisions')
+      decisions.value = response.data.decisions
+    } catch (e) {
+      error.value = e.message
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function fetchFlows() {
+    try {
+      const response = await axios.get('/api/sequence-flows')
+      flows.value = response.data.flows
+    } catch (e) {
+      console.error('Failed to fetch flows:', e)
+    }
+  }
+
+  async function fetchBpmnContent() {
+    try {
+      const response = await axios.get('/api/files/bpmn/content')
+      bpmnContent.value = response.data.content
+      return response.data.content
+    } catch (e) {
+      console.error('Failed to fetch BPMN:', e)
+      return null
+    }
+  }
+
+  return {
+    // State
+    currentJob,
+    stats,
+    processes,
+    tasks,
+    roles,
+    decisions,
+    flows,
+    bpmnContent,
+    loading,
+    error,
+    
+    // Actions
+    uploadFile,
+    startProcessing,
+    subscribeToJob,
+    fetchStats,
+    fetchProcesses,
+    fetchTasks,
+    fetchRoles,
+    fetchDecisions,
+    fetchFlows,
+    fetchBpmnContent,
+  }
+})
+
+
+
+
