@@ -43,6 +43,8 @@ class JobStatus(BaseModel):
     current_step: str
     progress: int  # 0-100
     steps: list[dict]
+    detail_message: Optional[str] = None  # 상세 진행 상황 메시지
+    chunk_info: Optional[dict] = None  # 청크 처리 정보 {"current": 1, "total": 5}
     error: Optional[str] = None
     result: Optional[dict] = None
 
@@ -65,6 +67,47 @@ async def health_check():
         "status": "ok",
         "neo4j": "connected" if neo4j_ok else "disconnected"
     }
+
+
+@app.get("/api/neo4j/status")
+async def get_neo4j_status():
+    """Check if Neo4j has existing data."""
+    neo4j = Neo4jClient()
+    try:
+        with neo4j.session() as session:
+            # Count existing data
+            result = session.run("""
+                MATCH (p:Process) WITH count(p) as processes
+                MATCH (t:Task) WITH processes, count(t) as tasks
+                MATCH (r:Role) WITH processes, tasks, count(r) as roles
+                RETURN processes, tasks, roles
+            """)
+            record = result.single()
+            
+            has_data = record["processes"] > 0 or record["tasks"] > 0 or record["roles"] > 0
+            
+            return {
+                "has_data": has_data,
+                "counts": {
+                    "processes": record["processes"],
+                    "tasks": record["tasks"],
+                    "roles": record["roles"]
+                }
+            }
+    finally:
+        neo4j.close()
+
+
+@app.post("/api/neo4j/clear")
+async def clear_neo4j():
+    """Clear all data from Neo4j."""
+    neo4j = Neo4jClient()
+    try:
+        with neo4j.session() as session:
+            session.run("MATCH (n) DETACH DELETE n")
+        return {"message": "Neo4j data cleared successfully"}
+    finally:
+        neo4j.close()
 
 
 @app.post("/api/upload")
@@ -120,7 +163,9 @@ async def start_processing(job_id: str, background_tasks: BackgroundTasks):
 
 
 async def process_pdf_background(job_id: str):
-    """Background task for PDF processing."""
+    """Background task for PDF processing with real-time SSE updates."""
+    import concurrent.futures
+    
     job = job_progress[job_id]
     file_path = job["file_path"]
     
@@ -136,12 +181,22 @@ async def process_pdf_background(job_id: str):
     ]
     job["steps"] = steps
     
+    # Create thread pool for running sync operations
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    loop = asyncio.get_event_loop()
+    
     try:
         workflow = PDF2BPMNWorkflow()
-        workflow.neo4j.init_schema()
+        
+        # Initialize Neo4j schema (run in thread)
+        update_step(job, 0, "processing", 5, "Neo4j 스키마 초기화 중...")
+        await asyncio.sleep(0)  # Allow SSE to send
+        await loop.run_in_executor(executor, workflow.neo4j.init_schema)
+        
+        update_step(job, 0, "processing", 10, "PDF 파일 로딩 중...")
+        await asyncio.sleep(0)
         
         # Step 1: Ingest PDF
-        update_step(job, 0, "processing", 10)
         state = {
             "pdf_paths": [file_path],
             "documents": [],
@@ -167,54 +222,98 @@ async def process_pdf_background(job_id: str):
             "skill_docs": {},
             "dmn_xml": None
         }
-        result = workflow.ingest_pdf(state)
+        result = await loop.run_in_executor(executor, workflow.ingest_pdf, state)
         state.update(result)
-        update_step(job, 0, "completed", 15)
+        
+        chunk_count = len(state.get("reference_chunks", []))
+        page_count = state.get("documents", [{}])[0].page_count if state.get("documents") else 0
+        update_step(job, 0, "completed", 15, f"PDF 파싱 완료: {page_count}페이지, {chunk_count}개 청크")
+        await asyncio.sleep(0)
         
         # Step 2: Segment sections
-        update_step(job, 1, "processing", 20)
-        result = workflow.segment_sections(state)
+        update_step(job, 1, "processing", 20, "섹션 분석 및 임베딩 생성 중...")
+        await asyncio.sleep(0)
+        result = await loop.run_in_executor(executor, workflow.segment_sections, state)
         state.update(result)
-        update_step(job, 1, "completed", 30)
+        section_count = len(state.get("sections", []))
+        update_step(job, 1, "completed", 30, f"섹션 분석 완료: {section_count}개 섹션")
+        await asyncio.sleep(0)
         
-        # Step 3: Extract candidates
-        update_step(job, 2, "processing", 35)
-        result = workflow.extract_candidates(state)
+        # Step 3: Extract candidates (with chunk progress)
+        chunks = state.get("reference_chunks", [])
+        total_chunks = len(chunks)
+        update_step(job, 2, "processing", 35, f"엔티티 추출 시작: {total_chunks}개 청크", 
+                   {"current": 0, "total": total_chunks})
+        await asyncio.sleep(0)
+        
+        # Custom extraction with progress updates (using polling approach)
+        # Since we can't easily callback from thread, we'll use a different approach
+        def extract_with_logging():
+            return workflow.extract_candidates_with_progress(state, 
+                lambda current, total, msg: update_step(
+                    job, 2, "processing", 
+                    35 + int((current / max(total, 1)) * 15),
+                    msg,
+                    {"current": current, "total": total}
+                )
+            )
+        
+        result = await loop.run_in_executor(executor, extract_with_logging)
         state.update(result)
-        update_step(job, 2, "completed", 50)
+        
+        process_count = len(state.get("processes", []))
+        task_count = len(state.get("tasks", []))
+        role_count = len(state.get("roles", []))
+        update_step(job, 2, "completed", 50, 
+                   f"추출 완료: 프로세스 {process_count}, 태스크 {task_count}, 역할 {role_count}")
+        await asyncio.sleep(0)
         
         # Step 4: Normalize
-        update_step(job, 3, "processing", 55)
-        result = workflow.normalize_entities(state)
+        update_step(job, 3, "processing", 55, "엔티티 정규화 및 중복 제거 중...")
+        await asyncio.sleep(0)
+        result = await loop.run_in_executor(executor, workflow.normalize_entities, state)
         state.update(result)
-        update_step(job, 3, "completed", 65)
+        update_step(job, 3, "completed", 65, "정규화 완료")
+        await asyncio.sleep(0)
         
-        # Step 5: Relationships (done in normalize)
-        update_step(job, 4, "processing", 70)
-        update_step(job, 4, "completed", 75)
+        # Step 5: Relationships
+        update_step(job, 4, "processing", 70, "Neo4j에 관계 생성 중...")
+        await asyncio.sleep(0)
+        # Relationships are created in normalize_entities
+        update_step(job, 4, "completed", 75, "관계 생성 완료")
+        await asyncio.sleep(0)
         
         # Step 6: Generate BPMN
-        update_step(job, 5, "processing", 80)
-        result = workflow.generate_skills(state)
+        update_step(job, 5, "processing", 78, "Agent Skill 문서 생성 중...")
+        await asyncio.sleep(0)
+        result = await loop.run_in_executor(executor, workflow.generate_skills, state)
         state.update(result)
-        result = workflow.assemble_bpmn(state)
+        
+        update_step(job, 5, "processing", 82, "BPMN XML 생성 중...")
+        await asyncio.sleep(0)
+        result = await loop.run_in_executor(executor, workflow.assemble_bpmn, state)
         state.update(result)
-        update_step(job, 5, "completed", 85)
+        update_step(job, 5, "completed", 85, "BPMN 생성 완료")
+        await asyncio.sleep(0)
         
         # Step 7: Generate DMN
-        update_step(job, 6, "processing", 88)
-        result = workflow.generate_dmn(state)
+        update_step(job, 6, "processing", 88, "DMN 의사결정 테이블 생성 중...")
+        await asyncio.sleep(0)
+        result = await loop.run_in_executor(executor, workflow.generate_dmn, state)
         state.update(result)
-        update_step(job, 6, "completed", 92)
+        update_step(job, 6, "completed", 92, "DMN 생성 완료")
+        await asyncio.sleep(0)
         
         # Step 8: Export
-        update_step(job, 7, "processing", 95)
-        result = workflow.export_artifacts(state)
+        update_step(job, 7, "processing", 95, "결과물 저장 중...")
+        await asyncio.sleep(0)
+        result = await loop.run_in_executor(executor, workflow.export_artifacts, state)
         state.update(result)
-        update_step(job, 7, "completed", 100)
+        update_step(job, 7, "completed", 100, "완료!")
         
         # Store result summary
         job["status"] = "completed"
+        job["detail_message"] = "모든 처리가 완료되었습니다!"
         job["result"] = {
             "processes": len(state.get("processes", [])),
             "tasks": len(state.get("tasks", [])),
@@ -231,17 +330,32 @@ async def process_pdf_background(job_id: str):
         import traceback
         job["status"] = "error"
         job["error"] = str(e)
+        job["detail_message"] = f"오류 발생: {str(e)}"
         job["current_step"] = "error"
         print(f"Error in background processing: {e}")
         traceback.print_exc()
+    finally:
+        executor.shutdown(wait=False)
 
 
-def update_step(job: dict, step_index: int, status: str, progress: int):
-    """Update step status and overall progress."""
+def update_step(job: dict, step_index: int, status: str, progress: int, 
+                detail_message: str = None, chunk_info: dict = None):
+    """Update step status and overall progress with detailed info."""
     if step_index < len(job["steps"]):
         job["steps"][step_index]["status"] = status
     job["progress"] = progress
     job["current_step"] = job["steps"][step_index]["name"] if step_index < len(job["steps"]) else "completed"
+    
+    # Add detail message for frontend display
+    if detail_message:
+        job["detail_message"] = detail_message
+    
+    # Add chunk processing info
+    if chunk_info:
+        job["chunk_info"] = chunk_info
+    elif status == "completed":
+        # Clear chunk info when step is completed
+        job["chunk_info"] = None
 
 
 @app.get("/api/jobs/{job_id}")
@@ -259,20 +373,22 @@ async def stream_job_status(job_id: str):
         raise HTTPException(404, "Job not found")
     
     async def event_generator():
-        last_progress = -1
+        last_data = ""
         while True:
             job = job_progress.get(job_id)
             if not job:
                 break
             
-            if job["progress"] != last_progress or job["status"] in ["completed", "error"]:
-                last_progress = job["progress"]
-                yield f"data: {json.dumps(job)}\n\n"
+            # Send update if any data changed (not just progress)
+            current_data = json.dumps(job, ensure_ascii=False)
+            if current_data != last_data:
+                last_data = current_data
+                yield f"data: {current_data}\n\n"
             
             if job["status"] in ["completed", "error"]:
                 break
             
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.2)  # Check more frequently for real-time updates
     
     return StreamingResponse(
         event_generator(),

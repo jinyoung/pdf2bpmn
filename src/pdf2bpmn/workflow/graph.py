@@ -189,6 +189,112 @@ class PDF2BPMNWorkflow:
             "current_step": "normalize_entities"
         }
     
+    def extract_candidates_with_progress(self, state: GraphState, progress_callback=None) -> GraphState:
+        """Extract candidates with progress callback for frontend updates."""
+        print("🔍 Extracting candidate entities with progress...")
+        
+        all_processes = []
+        all_tasks = []
+        all_roles = []
+        all_gateways = []
+        all_events = []
+        all_decisions = []
+        all_rules = []
+        
+        sections = state.get("sections", [])
+        documents = state.get("documents", [])
+        chunks = state.get("reference_chunks", [])
+        doc_id = documents[0].doc_id if documents else ""
+        
+        # Filter valid sections
+        valid_sections = [s for s in sections if s.content and len(s.content.strip()) >= 50]
+        total_sections = len(valid_sections)
+        
+        # Create chunk index for linking
+        chunk_by_page = {}
+        for chunk in chunks:
+            if chunk.page not in chunk_by_page:
+                chunk_by_page[chunk.page] = []
+            chunk_by_page[chunk.page].append(chunk)
+        
+        for i, section in enumerate(valid_sections):
+            # Report progress
+            if progress_callback:
+                section_preview = section.content[:50].replace('\n', ' ')
+                progress_callback(
+                    i + 1, 
+                    total_sections, 
+                    f"청크 {i+1}/{total_sections} LLM 분석 중: {section_preview}..."
+                )
+            
+            # Find relevant chunk for this section
+            section_chunk_id = ""
+            if section.page_from in chunk_by_page and chunk_by_page[section.page_from]:
+                section_chunk_id = chunk_by_page[section.page_from][0].chunk_id
+            
+            # Extract entities with existing context
+            existing_process_names = list(self.process_name_to_id.keys())
+            existing_role_names = list(self.role_name_to_id.keys())
+            
+            try:
+                extracted = self.entity_extractor.extract_from_text(
+                    section.content,
+                    existing_processes=existing_process_names,
+                    existing_roles=existing_role_names
+                )
+                
+                # Convert to entity objects
+                entities = self.entity_extractor.convert_to_entities(
+                    extracted, 
+                    doc_id,
+                    chunk_id=section_chunk_id,
+                    existing_processes=self.process_name_to_id,
+                    existing_roles=self.role_name_to_id
+                )
+                
+                # Collect entities
+                all_processes.extend(entities["processes"])
+                all_tasks.extend(entities["tasks"])
+                all_roles.extend(entities["roles"])
+                all_gateways.extend(entities["gateways"])
+                all_events.extend(entities["events"])
+                all_decisions.extend(entities["decisions"])
+                all_rules.extend(entities["rules"])
+                
+                # Accumulate mappings
+                self.task_role_map.update(entities.get("task_role_map", {}))
+                self.task_process_map.update(entities.get("task_process_map", {}))
+                self.entity_chunk_map.update(entities.get("entity_chunk_map", {}))
+                self.sequence_flows.extend(entities.get("sequence_flows", []))
+                
+                for role_id, decision_ids in entities.get("role_decision_map", {}).items():
+                    if role_id not in self.role_decision_map:
+                        self.role_decision_map[role_id] = []
+                    self.role_decision_map[role_id].extend(decision_ids)
+                
+                # Update name mappings
+                for proc in entities["processes"]:
+                    self.process_name_to_id[proc.name.lower()] = proc.proc_id
+                for role in entities["roles"]:
+                    self.role_name_to_id[role.name.lower()] = role.role_id
+                for task in entities["tasks"]:
+                    self.task_name_to_id[task.name.lower()] = task.task_id
+                    
+            except Exception as e:
+                print(f"   ⚠️ 청크 {i+1} 처리 중 오류: {e}")
+                continue
+        
+        return {
+            "processes": all_processes,
+            "tasks": all_tasks,
+            "roles": all_roles,
+            "gateways": all_gateways,
+            "events": all_events,
+            "dmn_decisions": all_decisions,
+            "dmn_rules": all_rules,
+            "current_step": "normalize_entities"
+        }
+    
     def normalize_entities(self, state: GraphState) -> GraphState:
         """Node: Normalize and deduplicate entities using vector search."""
         print("🔄 Normalizing and deduplicating entities...")

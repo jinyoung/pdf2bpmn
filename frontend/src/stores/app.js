@@ -148,6 +148,26 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
+  async function checkNeo4jStatus() {
+    try {
+      const response = await axios.get('/api/neo4j/status')
+      return response.data
+    } catch (e) {
+      console.error('Failed to check Neo4j status:', e)
+      return { has_data: false, counts: { processes: 0, tasks: 0, roles: 0 } }
+    }
+  }
+
+  async function clearNeo4j() {
+    try {
+      await axios.post('/api/neo4j/clear')
+      return true
+    } catch (e) {
+      console.error('Failed to clear Neo4j:', e)
+      return false
+    }
+  }
+
   return {
     // State
     currentJob,
@@ -172,6 +192,8 @@ export const useAppStore = defineStore('app', () => {
     fetchDecisions,
     fetchFlows,
     fetchBpmnContent,
+    checkNeo4jStatus,
+    clearNeo4j,
   }
 })
 

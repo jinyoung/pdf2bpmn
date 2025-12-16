@@ -82,7 +82,7 @@
       </div>
 
       <!-- Progress Bar -->
-      <div class="mb-8">
+      <div class="mb-6">
         <div class="flex items-center justify-between mb-2">
           <span class="text-sm text-gray-400">전체 진행률</span>
           <span class="text-sm font-mono text-blue-400">{{ currentJob.progress }}%</span>
@@ -92,6 +92,32 @@
             class="h-full progress-bar rounded-full transition-all duration-300"
             :style="{ width: currentJob.progress + '%' }"
           ></div>
+        </div>
+      </div>
+
+      <!-- Detail Message -->
+      <div v-if="currentJob.detail_message" class="mb-6 p-3 rounded-lg bg-blue-500/10 border border-blue-500/30">
+        <div class="flex items-center space-x-3">
+          <svg class="w-5 h-5 text-blue-400 animate-pulse flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span class="text-sm text-blue-300">{{ currentJob.detail_message }}</span>
+        </div>
+        
+        <!-- Chunk Progress -->
+        <div v-if="currentJob.chunk_info" class="mt-3">
+          <div class="flex items-center justify-between mb-1">
+            <span class="text-xs text-gray-400">청크 처리</span>
+            <span class="text-xs font-mono text-purple-400">
+              {{ currentJob.chunk_info.current }} / {{ currentJob.chunk_info.total }}
+            </span>
+          </div>
+          <div class="h-1.5 bg-gray-700 rounded-full overflow-hidden">
+            <div 
+              class="h-full bg-gradient-to-r from-purple-500 to-pink-500 rounded-full transition-all duration-300"
+              :style="{ width: (currentJob.chunk_info.current / currentJob.chunk_info.total * 100) + '%' }"
+            ></div>
+          </div>
         </div>
       </div>
 
@@ -134,11 +160,69 @@
       <!-- Start Button -->
       <div v-if="currentJob.status === 'pending'" class="mt-8 text-center">
         <button 
-          @click="startProcessing"
+          @click="handleStartProcessing"
           class="px-8 py-3 bg-gradient-to-r from-green-500 to-emerald-600 rounded-lg font-medium hover:from-green-600 hover:to-emerald-700 transition-all transform hover:scale-105"
         >
           🚀 변환 시작
         </button>
+      </div>
+      
+      <!-- Neo4j Clear Dialog -->
+      <div v-if="showNeo4jDialog" class="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+        <div class="glass rounded-xl p-6 max-w-md mx-4 animate-slide-up">
+          <div class="flex items-center space-x-3 mb-4">
+            <div class="w-12 h-12 rounded-full bg-yellow-500/20 flex items-center justify-center">
+              <svg class="w-6 h-6 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+            </div>
+            <h3 class="text-lg font-semibold">기존 데이터 발견</h3>
+          </div>
+          
+          <p class="text-gray-300 mb-4">
+            Neo4j에 기존 데이터가 있습니다:
+          </p>
+          
+          <div class="bg-white/5 rounded-lg p-4 mb-6 space-y-2">
+            <div class="flex justify-between text-sm">
+              <span class="text-gray-400">프로세스</span>
+              <span class="text-blue-400 font-mono">{{ neo4jStatus?.counts?.processes || 0 }}개</span>
+            </div>
+            <div class="flex justify-between text-sm">
+              <span class="text-gray-400">태스크</span>
+              <span class="text-purple-400 font-mono">{{ neo4jStatus?.counts?.tasks || 0 }}개</span>
+            </div>
+            <div class="flex justify-between text-sm">
+              <span class="text-gray-400">역할</span>
+              <span class="text-green-400 font-mono">{{ neo4jStatus?.counts?.roles || 0 }}개</span>
+            </div>
+          </div>
+          
+          <p class="text-sm text-gray-400 mb-6">
+            기존 데이터를 삭제하고 새로 시작하시겠습니까?
+          </p>
+          
+          <div class="flex space-x-3">
+            <button 
+              @click="proceedWithClear"
+              class="flex-1 px-4 py-2 bg-red-500 hover:bg-red-600 rounded-lg font-medium transition-all"
+            >
+              삭제 후 시작
+            </button>
+            <button 
+              @click="proceedWithoutClear"
+              class="flex-1 px-4 py-2 bg-blue-500 hover:bg-blue-600 rounded-lg font-medium transition-all"
+            >
+              추가로 적재
+            </button>
+            <button 
+              @click="showNeo4jDialog = false"
+              class="px-4 py-2 bg-gray-600 hover:bg-gray-500 rounded-lg font-medium transition-all"
+            >
+              취소
+            </button>
+          </div>
+        </div>
       </div>
 
       <!-- Completion Actions -->
@@ -184,6 +268,8 @@ import { useAppStore } from '../stores/app'
 const store = useAppStore()
 const fileInput = ref(null)
 const isDragging = ref(false)
+const showNeo4jDialog = ref(false)
+const neo4jStatus = ref(null)
 
 const currentJob = computed(() => store.currentJob)
 
@@ -244,6 +330,28 @@ async function uploadAndProcess(file) {
   } catch (e) {
     console.error('Upload failed:', e)
   }
+}
+
+async function handleStartProcessing() {
+  // Check Neo4j for existing data
+  neo4jStatus.value = await store.checkNeo4jStatus()
+  
+  if (neo4jStatus.value.has_data) {
+    showNeo4jDialog.value = true
+  } else {
+    await startProcessing()
+  }
+}
+
+async function proceedWithClear() {
+  showNeo4jDialog.value = false
+  await store.clearNeo4j()
+  await startProcessing()
+}
+
+async function proceedWithoutClear() {
+  showNeo4jDialog.value = false
+  await startProcessing()
 }
 
 async function startProcessing() {
