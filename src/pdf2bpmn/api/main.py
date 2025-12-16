@@ -473,6 +473,125 @@ async def get_tasks():
         neo4j.close()
 
 
+@app.get("/api/tasks/{task_id}")
+async def get_task_detail(task_id: str):
+    """Get task detail with evidence/source information."""
+    neo4j = Neo4jClient()
+    try:
+        with neo4j.session() as session:
+            # Try to find by task_id or by BPMN element ID (Activity_xxx)
+            result = session.run("""
+                MATCH (t:Task)
+                WHERE t.task_id = $task_id OR t.name CONTAINS $task_id OR t.task_id CONTAINS $task_id
+                OPTIONAL MATCH (t)-[:PERFORMED_BY]->(r:Role)
+                OPTIONAL MATCH (p:Process)-[:HAS_TASK]->(t)
+                OPTIONAL MATCH (t)-[:SUPPORTED_BY]->(c:ReferenceChunk)
+                OPTIONAL MATCH (t)-[:NEXT]->(next:Task)
+                OPTIONAL MATCH (prev:Task)-[:NEXT]->(t)
+                RETURN t {.*} as task,
+                       r {.name, .role_id, .description} as role,
+                       p {.name, .proc_id, .description} as process,
+                       collect(DISTINCT {
+                           chunk_id: c.chunk_id,
+                           page: c.page, 
+                           text: c.text,
+                           span: c.span
+                       }) as evidences,
+                       collect(DISTINCT {name: next.name, task_id: next.task_id}) as next_tasks,
+                       collect(DISTINCT {name: prev.name, task_id: prev.task_id}) as prev_tasks
+                LIMIT 1
+            """, {"task_id": task_id})
+            
+            record = result.single()
+            if not record:
+                raise HTTPException(404, "Task not found")
+            
+            task = record["task"]
+            task["role"] = record["role"]
+            task["process"] = record["process"]
+            task["evidences"] = [e for e in record["evidences"] if e.get("chunk_id")]
+            task["next_tasks"] = [n for n in record["next_tasks"] if n.get("name")]
+            task["prev_tasks"] = [p for p in record["prev_tasks"] if p.get("name")]
+            
+            return task
+    finally:
+        neo4j.close()
+
+
+@app.get("/api/bpmn/element/{element_id}")
+async def get_bpmn_element(element_id: str):
+    """Get element info by BPMN element ID (e.g., Activity_xxx, Gateway_xxx)."""
+    neo4j = Neo4jClient()
+    try:
+        with neo4j.session() as session:
+            # Search across different entity types
+            # Try Task first
+            result = session.run("""
+                MATCH (t:Task)
+                WHERE t.name CONTAINS $search_term OR t.task_id CONTAINS $search_term
+                OPTIONAL MATCH (t)-[:PERFORMED_BY]->(r:Role)
+                OPTIONAL MATCH (p:Process)-[:HAS_TASK]->(t)
+                OPTIONAL MATCH (t)-[:SUPPORTED_BY]->(c:ReferenceChunk)
+                RETURN 'Task' as element_type,
+                       t {.*} as element,
+                       r {.name, .role_id, .description} as related_role,
+                       p {.name, .proc_id} as related_process,
+                       collect(DISTINCT {
+                           page: c.page, 
+                           text: c.text
+                       }) as evidences
+                LIMIT 1
+            """, {"search_term": element_id.replace("Activity_", "").replace("_", " ")})
+            
+            record = result.single()
+            
+            if not record:
+                # Try Gateway
+                result = session.run("""
+                    MATCH (g:Gateway)
+                    WHERE g.name CONTAINS $search_term OR g.gateway_id CONTAINS $search_term
+                    OPTIONAL MATCH (p:Process)-[:HAS_GATEWAY]->(g)
+                    OPTIONAL MATCH (g)-[:SUPPORTED_BY]->(c:ReferenceChunk)
+                    RETURN 'Gateway' as element_type,
+                           g {.*} as element,
+                           null as related_role,
+                           p {.name, .proc_id} as related_process,
+                           collect(DISTINCT {page: c.page, text: c.text}) as evidences
+                    LIMIT 1
+                """, {"search_term": element_id.replace("Gateway_", "").replace("_", " ")})
+                record = result.single()
+            
+            if not record:
+                # Try Event
+                result = session.run("""
+                    MATCH (e:Event)
+                    WHERE e.name CONTAINS $search_term OR e.event_id CONTAINS $search_term
+                    OPTIONAL MATCH (p:Process)-[:HAS_EVENT]->(e)
+                    OPTIONAL MATCH (e)-[:SUPPORTED_BY]->(c:ReferenceChunk)
+                    RETURN 'Event' as element_type,
+                           e {.*} as element,
+                           null as related_role,
+                           p {.name, .proc_id} as related_process,
+                           collect(DISTINCT {page: c.page, text: c.text}) as evidences
+                    LIMIT 1
+                """, {"search_term": element_id.replace("Event_", "").replace("StartEvent_", "").replace("EndEvent_", "").replace("_", " ")})
+                record = result.single()
+            
+            if not record:
+                return {"found": False, "element_id": element_id}
+            
+            return {
+                "found": True,
+                "element_type": record["element_type"],
+                "element": record["element"],
+                "role": record["related_role"],
+                "process": record["related_process"],
+                "evidences": [e for e in record["evidences"] if e.get("page")]
+            }
+    finally:
+        neo4j.close()
+
+
 @app.get("/api/roles")
 async def get_roles():
     """Get all roles."""

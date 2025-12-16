@@ -74,7 +74,7 @@
       </div>
 
       <!-- Side Panel: Selected Element Info -->
-      <div v-if="selectedElement" class="w-80 glass border-l border-white/10 overflow-y-auto">
+      <div v-if="selectedElement" class="w-96 glass border-l border-white/10 overflow-y-auto">
         <div class="p-4">
           <div class="flex items-center justify-between mb-4">
             <h3 class="font-semibold">선택된 요소</h3>
@@ -85,20 +85,115 @@
             </button>
           </div>
           
-          <div class="space-y-4">
-            <div>
-              <label class="text-xs text-gray-400 uppercase tracking-wider">이름</label>
-              <p class="font-medium">{{ selectedElement.name || selectedElement.id }}</p>
+          <!-- Loading State -->
+          <div v-if="loadingDetail" class="flex items-center justify-center py-8">
+            <svg class="w-6 h-6 animate-spin text-blue-500" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+            </svg>
+          </div>
+          
+          <!-- Element Info -->
+          <div v-else class="space-y-4">
+            <!-- Basic Info -->
+            <div class="p-3 rounded-lg bg-white/5">
+              <div class="flex items-center space-x-2 mb-2">
+                <span class="px-2 py-0.5 text-xs rounded-full" 
+                      :class="elementTypeClass(selectedElement.type)">
+                  {{ selectedElement.type }}
+                </span>
+              </div>
+              <h4 class="text-lg font-semibold">{{ selectedElement.name || selectedElement.id }}</h4>
             </div>
             
-            <div>
-              <label class="text-xs text-gray-400 uppercase tracking-wider">유형</label>
-              <p class="text-sm">{{ selectedElement.type }}</p>
+            <!-- Description -->
+            <div v-if="elementDetail?.element?.description" class="p-3 rounded-lg bg-blue-500/10 border border-blue-500/30">
+              <label class="text-xs text-blue-400 uppercase tracking-wider flex items-center space-x-1">
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span>설명</span>
+              </label>
+              <p class="text-sm text-gray-300 mt-2">{{ elementDetail.element.description }}</p>
             </div>
             
-            <div v-if="selectedElement.description">
-              <label class="text-xs text-gray-400 uppercase tracking-wider">설명</label>
-              <p class="text-sm text-gray-300">{{ selectedElement.description }}</p>
+            <!-- Role Info -->
+            <div v-if="elementDetail?.role" class="p-3 rounded-lg bg-purple-500/10 border border-purple-500/30">
+              <label class="text-xs text-purple-400 uppercase tracking-wider flex items-center space-x-1">
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                </svg>
+                <span>담당자</span>
+              </label>
+              <p class="font-medium mt-2">{{ elementDetail.role.name }}</p>
+              <p v-if="elementDetail.role.description" class="text-xs text-gray-400 mt-1">
+                {{ elementDetail.role.description }}
+              </p>
+            </div>
+            
+            <!-- Process Info -->
+            <div v-if="elementDetail?.process" class="p-3 rounded-lg bg-green-500/10 border border-green-500/30">
+              <label class="text-xs text-green-400 uppercase tracking-wider flex items-center space-x-1">
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6z" />
+                </svg>
+                <span>소속 프로세스</span>
+              </label>
+              <p class="font-medium mt-2">{{ elementDetail.process.name }}</p>
+            </div>
+            
+            <!-- Sequence Info -->
+            <div v-if="elementDetail?.next_tasks?.length || elementDetail?.prev_tasks?.length" 
+                 class="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/30">
+              <label class="text-xs text-yellow-400 uppercase tracking-wider flex items-center space-x-1">
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+                </svg>
+                <span>흐름</span>
+              </label>
+              <div class="mt-2 space-y-2">
+                <div v-if="elementDetail?.prev_tasks?.length" class="flex items-center text-sm">
+                  <span class="text-gray-400 mr-2">이전:</span>
+                  <span v-for="(task, i) in elementDetail.prev_tasks" :key="task.task_id" class="text-gray-300">
+                    {{ task.name }}<span v-if="i < elementDetail.prev_tasks.length - 1">, </span>
+                  </span>
+                </div>
+                <div v-if="elementDetail?.next_tasks?.length" class="flex items-center text-sm">
+                  <span class="text-gray-400 mr-2">다음:</span>
+                  <span v-for="(task, i) in elementDetail.next_tasks" :key="task.task_id" class="text-gray-300">
+                    {{ task.name }}<span v-if="i < elementDetail.next_tasks.length - 1">, </span>
+                  </span>
+                </div>
+              </div>
+            </div>
+            
+            <!-- Evidence / Source Documents -->
+            <div v-if="elementDetail?.evidences?.length" class="space-y-3">
+              <label class="text-xs text-orange-400 uppercase tracking-wider flex items-center space-x-1">
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                <span>출처 문서</span>
+              </label>
+              
+              <div v-for="(evidence, idx) in elementDetail.evidences" :key="idx" 
+                   class="p-3 rounded-lg bg-orange-500/10 border border-orange-500/30">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="text-xs font-mono text-orange-400">
+                    📄 페이지 {{ evidence.page || '?' }}
+                  </span>
+                </div>
+                <p class="text-sm text-gray-300 leading-relaxed">
+                  "{{ truncateText(evidence.text, 300) }}"
+                </p>
+              </div>
+            </div>
+            
+            <!-- No Evidence -->
+            <div v-else-if="!loadingDetail" class="p-3 rounded-lg bg-gray-500/10 border border-gray-500/30">
+              <p class="text-sm text-gray-400 text-center">
+                출처 문서 정보가 없습니다
+              </p>
             </div>
           </div>
         </div>
@@ -108,14 +203,17 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
 import { useAppStore } from '../stores/app'
+import axios from 'axios'
 
 const store = useAppStore()
 const bpmnContainer = ref(null)
 const loading = ref(true)
 const error = ref(null)
 const selectedElement = ref(null)
+const elementDetail = ref(null)
+const loadingDetail = ref(false)
 
 let bpmnViewer = null
 
@@ -128,6 +226,62 @@ onUnmounted(() => {
     bpmnViewer.destroy()
   }
 })
+
+// Watch for element selection and fetch details
+watch(selectedElement, async (newElement) => {
+  if (newElement) {
+    await fetchElementDetail(newElement)
+  } else {
+    elementDetail.value = null
+  }
+})
+
+async function fetchElementDetail(element) {
+  loadingDetail.value = true
+  elementDetail.value = null
+  
+  try {
+    // Try to fetch by element name (more reliable than BPMN ID)
+    const response = await axios.get(`/api/bpmn/element/${encodeURIComponent(element.name || element.id)}`)
+    
+    if (response.data.found) {
+      elementDetail.value = response.data
+    } else {
+      // If not found by name, try a more flexible search
+      const searchTerm = element.name || element.id.replace(/Activity_|Gateway_|Event_|StartEvent_|EndEvent_/g, '').replace(/_/g, ' ')
+      const retryResponse = await axios.get(`/api/bpmn/element/${encodeURIComponent(searchTerm)}`)
+      
+      if (retryResponse.data.found) {
+        elementDetail.value = retryResponse.data
+      }
+    }
+  } catch (e) {
+    console.error('Failed to fetch element detail:', e)
+  } finally {
+    loadingDetail.value = false
+  }
+}
+
+function truncateText(text, maxLength = 200) {
+  if (!text) return ''
+  if (text.length <= maxLength) return text
+  return text.substring(0, maxLength) + '...'
+}
+
+function elementTypeClass(type) {
+  const classes = {
+    'Task': 'bg-blue-500/20 text-blue-400',
+    'UserTask': 'bg-blue-500/20 text-blue-400',
+    'ServiceTask': 'bg-cyan-500/20 text-cyan-400',
+    'Gateway': 'bg-yellow-500/20 text-yellow-400',
+    'ExclusiveGateway': 'bg-yellow-500/20 text-yellow-400',
+    'ParallelGateway': 'bg-orange-500/20 text-orange-400',
+    'StartEvent': 'bg-green-500/20 text-green-400',
+    'EndEvent': 'bg-red-500/20 text-red-400',
+    'Event': 'bg-purple-500/20 text-purple-400',
+  }
+  return classes[type] || 'bg-gray-500/20 text-gray-400'
+}
 
 async function loadBpmn() {
   loading.value = true
